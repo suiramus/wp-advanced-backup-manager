@@ -288,7 +288,9 @@ function wpabm_handle_requests() {
 				continue; // Handle separately
 			}
 			if (file_exists($component['path'])) {
-				$sources[$component['path']] = $key;
+				// Use actual filename for special files, key for directories
+				$local_name = is_file($component['path']) ? basename($component['path']) : $key;
+				$sources[$component['path']] = $local_name;  // ✅ Acum corect!
 				$components_included[] = $component['label'];
 			}
 		}
