@@ -28,20 +28,37 @@ define('WPABM_PLUGIN_DIR', plugin_dir_path(__FILE__));
  */
 function wpabm_ensure_backup_dir() {
 	if (!file_exists(WPABM_BACKUP_DIR)) {
-		@mkdir(WPABM_BACKUP_DIR, 0755, true);
-	}
-	if (file_exists(WPABM_BACKUP_DIR) && !is_writable(WPABM_BACKUP_DIR)) {
-		@chmod(WPABM_BACKUP_DIR, 0755);
-	}
-	if (is_writable(WPABM_BACKUP_DIR)) {
-		if (!file_exists(WPABM_BACKUP_DIR . '/.htaccess')) {
-			@file_put_contents(WPABM_BACKUP_DIR . '/.htaccess', "deny from all");
+		if (!wp_mkdir_p(WPABM_BACKUP_DIR)) {
+			error_log('WP Advanced Backup: Failed to create backup directory: ' . WPABM_BACKUP_DIR);
+			return false;
 		}
-		if (!file_exists(WPABM_BACKUP_DIR . '/index.php')) {
-			@file_put_contents(WPABM_BACKUP_DIR . '/index.php', '<?php // WP Advanced Backup');
+	}
+	
+	if (!is_writable(WPABM_BACKUP_DIR)) {
+		if (!chmod(WPABM_BACKUP_DIR, 0755)) {
+			error_log('WP Advanced Backup: Failed to set permissions on backup directory: ' . WPABM_BACKUP_DIR);
+			return false;
+		}
+	}
+	
+	if (is_writable(WPABM_BACKUP_DIR)) {
+		$htaccess_file = WPABM_BACKUP_DIR . '/.htaccess';
+		if (!file_exists($htaccess_file)) {
+			if (file_put_contents($htaccess_file, "deny from all") === false) {
+				error_log('WP Advanced Backup: Failed to create .htaccess file');
+			}
+		}
+		
+		$index_file = WPABM_BACKUP_DIR . '/index.php';
+		if (!file_exists($index_file)) {
+			if (file_put_contents($index_file, '<?php // WP Advanced Backup') === false) {
+				error_log('WP Advanced Backup: Failed to create index.php file');
+			}
 		}
 		return true;
 	}
+	
+	error_log('WP Advanced Backup: Backup directory is not writable: ' . WPABM_BACKUP_DIR);
 	return false;
 }
 
@@ -135,12 +152,12 @@ function wpabm_export_db() {
 	foreach ($tables as $table) {
 		$table_name = $table[0];
 		
-		$create = $wpdb->get_results($wpdb->prepare("SHOW CREATE TABLE %i", $table_name), ARRAY_N);
+		$create = $wpdb->get_results($wpdb->prepare("SHOW CREATE TABLE `%s`", $table_name), ARRAY_N);
 		if (empty($create)) continue;
 		
 		$sql .= "DROP TABLE IF EXISTS `" . esc_sql($table_name) . "`;\n" . $create[0][1] . ";\n\n";
 		
-		$rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM %i", $table_name), ARRAY_A);
+		$rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM `%s`", $table_name), ARRAY_A);
 		if ($rows) {
 			foreach ($rows as $row) {
 				$vals = array_map(function($v) { 
@@ -181,8 +198,10 @@ function wpabm_export_wxr() {
  */
 function wpabm_create_zip($zip_path, $sources, $options = array()) {
 	if (!class_exists('ZipArchive')) {
-		return "Eroare: ZipArchive inactiv.";
+		error_log('WP Advanced Backup: ZipArchive extension is not available');
+		return "Eroare: Extensia ZipArchive nu este activată pe acest server. Contactează hosting-ul pentru activare.";
 	}
+	
 	if (!wpabm_ensure_backup_dir()) {
 		return "Eroare: Directorul destinație nu poate fi scris.";
 	}
@@ -357,7 +376,9 @@ function wpabm_handle_requests() {
 				$real_backup_dir = realpath(WPABM_BACKUP_DIR);
 				
 				if ($real_path && $real_backup_dir && file_exists($file) && strpos($real_path, $real_backup_dir) === 0) {
-					@unlink($file);
+					if (!unlink($file)) {
+						error_log('WP Advanced Backup: Failed to delete file: ' . $file);
+					}
 				}
 			}
 			wp_redirect(admin_url('admin.php?page=wpabm&status=bulk_deleted'));
@@ -419,8 +440,13 @@ function wpabm_handle_requests() {
 				readfile($file);
 				exit;
 			} elseif (isset($_GET['wpabm_do']) && $_GET['wpabm_do'] === 'delete') {
-				@unlink($file);
-				wp_redirect(admin_url('admin.php?page=wpabm&status=deleted'));
+				if (!unlink($file)) {
+					error_log('WP Advanced Backup: Failed to delete file: ' . $file);
+					set_transient('wpabm_error', 'Eroare la ștergerea backup-ului.', 30);
+					wp_redirect(admin_url('admin.php?page=wpabm&status=error'));
+				} else {
+					wp_redirect(admin_url('admin.php?page=wpabm&status=deleted'));
+				}
 				exit;
 			}
 		} else {
@@ -1004,18 +1030,43 @@ function wpabm_render_backups_table() {
 }
 
 
+
 /**
  * GET LOCAL TIME FROM WORDPRESS SETTINGS
  */
 function wpabm_get_local_time() {
-	$gmt_offset = get_option('gmt_offset') * 3600;
-	$local_time = time() + $gmt_offset;
-	return $local_time;
+	$timezone_string = get_option('timezone_string');
+	if (empty($timezone_string)) {
+		$gmt_offset = get_option('gmt_offset');
+		$timezone_string = 'Etc/GMT' . ($gmt_offset > 0 ? '-' : '+') . abs($gmt_offset);
+	}
+	
+	try {
+		$tz = new DateTimeZone($timezone_string);
+		$datetime = new DateTime('now', $tz);
+		return $datetime->getTimestamp();
+	} catch (Exception $e) {
+		error_log('WP Advanced Backup: Timezone error: ' . $e->getMessage());
+		return time();
+	}
 }
 
 /**
  * FORMAT LOCAL TIME
  */
 function wpabm_format_local_time($format = 'd.m.Y H:i:s') {
-	return date($format, wpabm_get_local_time());
+	$timezone_string = get_option('timezone_string');
+	if (empty($timezone_string)) {
+		$gmt_offset = get_option('gmt_offset');
+		$timezone_string = 'Etc/GMT' . ($gmt_offset > 0 ? '-' : '+') . abs($gmt_offset);
+	}
+	
+	try {
+		$tz = new DateTimeZone($timezone_string);
+		$datetime = new DateTime('now', $tz);
+		return $datetime->format($format);
+	} catch (Exception $e) {
+		error_log('WP Advanced Backup: Timezone error: ' . $e->getMessage());
+		return date($format);
+	}
 }
