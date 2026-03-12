@@ -218,7 +218,7 @@ function wpabm_create_zip($zip_path, $sources, $options = array()) {
 
 	foreach ($sources as $path => $local_name) {
 		if (!file_exists($path)) continue;
-		
+    
 		if (is_file($path)) { 
 			$zip->addFile($path, $local_name); 
 			continue; 
@@ -232,7 +232,16 @@ function wpabm_create_zip($zip_path, $sources, $options = array()) {
 		foreach ($files as $file) {
 			$file_path = $file->getRealPath();
 			if (!$file_path || !is_readable($file_path)) continue;
-			$rel_path = $local_name . str_replace($path, '', $file_path);
+    
+			// Get the relative path from the source directory
+			$relative = str_replace(realpath($path), '', $file_path);
+			// Remove leading backslash/slash
+			$relative = ltrim($relative, DIRECTORY_SEPARATOR);
+			// Normalize path separators for ZIP (always use forward slash)
+			$relative = str_replace(DIRECTORY_SEPARATOR, '/', $relative);
+    
+			// Create the ZIP path: directoryname/relativepath
+			$rel_path = $local_name . '/' . $relative;
 			
 			foreach ($exclude as $ex) { 
 				if (strpos($file_path, $ex) !== false) continue 2; 
@@ -308,8 +317,13 @@ function wpabm_handle_requests() {
 			}
 			if (file_exists($component['path'])) {
 				// Use actual filename for special files, key for directories
-				$local_name = is_file($component['path']) ? basename($component['path']) : $key;
-				$sources[$component['path']] = $local_name;  // ✅ Acum corect!
+				if (is_file($component['path'])) {
+					$local_name = basename($component['path']);
+				} else {
+					// For directories, use the directory name itself
+					$local_name = basename($component['path']);
+				}
+				$sources[$component['path']] = $local_name;
 				$components_included[] = $component['label'];
 			}
 		}
